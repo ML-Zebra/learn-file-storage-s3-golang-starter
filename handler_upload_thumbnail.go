@@ -1,10 +1,10 @@
 package main
 
 import (
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
@@ -57,9 +57,18 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusBadRequest, "Missing Content-Type for thumbnail", nil)
 		return
 	}
-	data, err := io.ReadAll(file)
+
+	// Save the file to disk
+	assetPath := getAssetPath(videoID, mediaType)
+	assetDiskPath := cfg.getAssetDiskPath(assetPath)
+	dst, err := os.Create(assetDiskPath)
 	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Couldn't read file", err)
+		respondWithError(w, http.StatusInternalServerError, "Couldn't create file on server", err)
+		return
+	}
+	defer dst.Close()
+	if _, err = io.Copy(dst, file); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't save file", err)
 		return
 	}
 
@@ -75,12 +84,8 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusUnauthorized, "User is not the owner of the video", nil)
 		return
 	}
-
-	// Encode the thumbnail to store it in the database
-	thumbnailBase64 := base64.StdEncoding.EncodeToString(data)
-
 	// Update the video in the database
-	thumbnailUrl := fmt.Sprintf("data:%s;base64,%s", mediaType, thumbnailBase64)
+	thumbnailUrl := cfg.getAssetURL(assetPath)
 	video.ThumbnailURL = &thumbnailUrl
 	video.UpdatedAt = time.Now() // not currently supported by UpdateVideo
 	err = cfg.db.UpdateVideo(video)
