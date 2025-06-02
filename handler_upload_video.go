@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
@@ -87,8 +92,25 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Get the aspect ratio of the video
+	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't get video aspect ratio", err)
+		return
+	}
+	directory := ""
+	switch aspectRatio {
+	case "9:16":
+		directory = "portrait"
+	case "16:9":
+		directory = "landscape"
+	default:
+		directory = "other"
+	}
+
 	// Generate a random S3 file key
 	s3FileKey := getAssetPath(mediaType)
+	s3FileKey = filepath.Join(directory, s3FileKey)
 
 	// Create the S3 PutObjectInput
 	s3PutObjectInput := &s3.PutObjectInput{
@@ -113,4 +135,52 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	respondWithJSON(w, http.StatusOK, video)
+}
+
+func getVideoAspectRatio(filePath string) (string, error) {
+	cmd := exec.Command("ffprobe",
+		"-v", "error",
+		"-print_format", "json",
+		"-select_streams", "v:0",
+		"-show_streams",
+		filePath,
+	)
+	cmd.Stdout = &bytes.Buffer{}
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("ffprobe command failed: %w", err)
+	}
+
+	var output struct {
+		Streams []struct {
+			Width  int `json:"width"`
+			Height int `json:"height"`
+		} `json:"streams"`
+	}
+
+	if err := json.Unmarshal(cmd.Stdout.(*bytes.Buffer).Bytes(), &output); err != nil {
+		return "", fmt.Errorf("could not parse ffprobe output: %v", err)
+	}
+
+	if len(output.Streams) == 0 {
+		return "", fmt.Errorf("no video streams found")
+	}
+
+	width := float64(output.Streams[0].Width)
+	height := float64(output.Streams[0].Height)
+	if height == 0 {
+		return "", fmt.Errorf("video height is zero, cannot determine aspect ratio")
+	}
+	aspectRatio := width / height
+
+	verticalAspectRatio := 9.0 / 16.0
+	horizontalAspectRatio := 16.0 / 9.0
+	aspectRatioTolerance := 0.05
+	if aspectRatio >= verticalAspectRatio-aspectRatioTolerance && aspectRatio <= verticalAspectRatio+aspectRatioTolerance {
+		return "9:16", nil
+	}
+	if aspectRatio >= horizontalAspectRatio-aspectRatioTolerance && aspectRatio <= horizontalAspectRatio+aspectRatioTolerance {
+		return "16:9", nil
+	}
+	return "other", nil
 }
